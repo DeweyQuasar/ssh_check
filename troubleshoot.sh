@@ -1,126 +1,123 @@
 #!/bin/bash
+# Script to perform a full audit of SSH configuration and keys on a system
 
-# Script: troubleshoot_ssh_services.sh
-# Purpose: Diagnose and troubleshoot SSH/sshd services and configurations
-# User Profile: Tailored for AWS Session Manager with ec2-user (requires sudo)
-
-log_file="/home/ec2-user/troubleshoot_ssh.log"
-sshd_config="/etc/ssh/sshd_config"
-
-# Start logging
-echo "Starting SSH troubleshooting at $(date)" | sudo tee "$log_file"
-
-# Function: Check if a command exists
-check_command() {
-    if ! command -v "$1" &>/dev/null; then
-        echo "ERROR: Command '$1' not found. Please install it using 'sudo yum install $1' or 'sudo apt install $1'." | sudo tee -a "$log_file"
-        exit 1
-    fi
-}
-
-# Ensure required commands exist
-check_command ssh
-check_command sshd
-check_command nc
-check_command ss
-check_command iptables
-
-# Check SSH service status
-echo "Checking SSH service status..." | sudo tee -a "$log_file"
-sudo systemctl is-active --quiet sshd
-if [ $? -ne 0 ]; then
-    echo "ERROR: sshd service is not running. Attempting to restart..." | sudo tee -a "$log_file"
-    sudo systemctl restart sshd
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Failed to restart sshd. Check system logs for more details." | sudo tee -a "$log_file"
-        exit 1
-    fi
-    echo "INFO: sshd service restarted successfully." | sudo tee -a "$log_file"
-else
-    echo "INFO: sshd service is running." | sudo tee -a "$log_file"
-fi
-
-# Verify SSH configuration
-echo "Checking SSH configuration for errors..." | sudo tee -a "$log_file"
-sudo sshd -t
-if [ $? -ne 0 ]; then
-    echo "ERROR: Invalid sshd configuration. Run 'sudo sshd -t' to see specific errors." | sudo tee -a "$log_file"
+# Ensure the script runs as root
+if [ "$(id -u)" -ne 0 ]; then
+    echo "This script must be run with sudo."
     exit 1
-else
-    echo "INFO: sshd configuration is valid." | sudo tee -a "$log_file"
 fi
 
-# Check SSH key configurations for root, dewey, and ec2-user
-for user in root dewey ec2-user; do
-    echo "Checking SSH key configurations for user $user..." | sudo tee -a "$log_file"
-    user_ssh_dir="/home/$user/.ssh"
-    if [ -d "$user_ssh_dir" ]; then
-        echo "INFO: SSH directory exists for $user at $user_ssh_dir." | sudo tee -a "$log_file"
-        if [ -f "$user_ssh_dir/authorized_keys" ]; then
-            echo "INFO: Found authorized_keys for $user." | sudo tee -a "$log_file"
-        else
-            echo "WARNING: No authorized_keys found for $user. SSH access might be restricted." | sudo tee -a "$log_file"
-        fi
+echo "Starting comprehensive SSH audit..."
+
+# Check SSH configuration files
+echo "Checking SSH configuration files..."
+for config_file in /etc/ssh/sshd_config /etc/ssh/ssh_config; do
+    if [ -f "$config_file" ]; then
+        echo "Contents of $config_file:"
+        cat "$config_file"
+        echo "Permissions of $config_file:"
+        ls -l "$config_file"
+        echo
     else
-        echo "WARNING: SSH directory does not exist for $user. SSH access might be restricted." | sudo tee -a "$log_file"
+        echo "$config_file does not exist."
+        echo
     fi
 done
 
-# Check auxiliary port configurations
-echo "Checking for auxiliary SSH ports..." | sudo tee -a "$log_file"
-aux_ports=$(sudo grep -E '^Port ' "$sshd_config" | awk '{print $2}')
-if [ -z "$aux_ports" ]; then
-    echo "INFO: No auxiliary ports configured in $sshd_config." | sudo tee -a "$log_file"
-else
-    echo "INFO: Auxiliary ports found: $aux_ports" | sudo tee -a "$log_file"
-    for port in $aux_ports; do
-        sudo ss -tuln | grep ":$port" &>/dev/null
-        if [ $? -ne 0 ]; then
-            echo "WARNING: Port $port is not listening. Check sshd configuration and firewall rules." | sudo tee -a "$log_file"
-        else
-            echo "INFO: Port $port is active and listening." | sudo tee -a "$log_file"
-        fi
-    done
-fi
-
-# Check firewall rules
-echo "Checking firewall rules for SSH ports..." | sudo tee -a "$log_file"
-sudo iptables -L | grep -E 'ACCEPT.*(ssh|22)' &>/dev/null
-if [ $? -ne 0 ]; then
-    echo "WARNING: SSH port 22 is not open in the firewall. Use 'sudo iptables' or 'sudo ufw' to allow it." | sudo tee -a "$log_file"
-else
-    echo "INFO: Firewall allows SSH traffic on port 22." | sudo tee -a "$log_file"
-fi
-for port in $aux_ports; do
-    sudo iptables -L | grep -E "ACCEPT.*$port" &>/dev/null
-    if [ $? -ne 0 ]; then
-        echo "WARNING: Auxiliary port $port is not open in the firewall. Use 'sudo iptables' or 'sudo ufw' to allow it." | sudo tee -a "$log_file"
+# Check SSH known hosts
+echo "Checking SSH known hosts files..."
+for known_hosts in /etc/ssh/ssh_known_hosts ~/.ssh/known_hosts; do
+    if [ -f "$known_hosts" ]; then
+        echo "Contents of $known_hosts:"
+        cat "$known_hosts"
+        echo "Permissions of $known_hosts:"
+        ls -l "$known_hosts"
+        echo
     else
-        echo "INFO: Firewall allows SSH traffic on port $port." | sudo tee -a "$log_file"
+        echo "$known_hosts does not exist."
+        echo
     fi
 done
 
-# Test connectivity to remote host
-read -p "Enter remote host to test connectivity (or press Enter to skip): " remote_host
-if [ -n "$remote_host" ]; then
-    echo "Testing connectivity to $remote_host..." | sudo tee -a "$log_file"
-    nc -zv "$remote_host" 22 &>/dev/null
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Unable to connect to $remote_host on port 22. Check network settings and remote firewall rules." | sudo tee -a "$log_file"
+# Check SSH key files
+echo "Checking SSH key files..."
+ssh_key_directories=(/etc/ssh /root/.ssh /home/*/.ssh)
+for dir in "${ssh_key_directories[@]}"; do
+    if [ -d "$dir" ]; then
+        echo "Listing SSH key files in $dir:"
+        find "$dir" -type f -name '*.pub' -or -name 'id_*' | while read -r key_file; do
+            echo "Key file: $key_file"
+            echo "Permissions of $key_file:"
+            ls -l "$key_file"
+            echo
+        done
     else
-        echo "INFO: Successfully connected to $remote_host on port 22." | sudo tee -a "$log_file"
+        echo "$dir does not exist."
+        echo
     fi
+done
+
+# Check the permissions of the .ssh directories
+echo "Checking permissions of .ssh directories..."
+for dir in /root/.ssh /home/*/.ssh; do
+    if [ -d "$dir" ]; then
+        echo "Permissions of $dir:"
+        ls -ld "$dir"
+        echo
+    else
+        echo "$dir does not exist."
+        echo
+    fi
+done
+
+# Check SSH Daemon settings in systemd (if applicable)
+echo "Checking systemd SSH daemon configuration..."
+if systemctl is-enabled sshd 2>/dev/null; then
+    echo "SSHD service status:"
+    systemctl status sshd
+    echo "SSHD service configuration:"
+    systemctl cat sshd | cat
+    echo
+else
+    echo "SSHD service is not enabled."
+    echo
 fi
 
-# Check SELinux status
-if command -v getenforce &>/dev/null; then
-    echo "Checking SELinux status..." | sudo tee -a "$log_file"
-    selinux_status=$(sudo getenforce)
-    if [ "$selinux_status" != "Disabled" ]; then
-        echo "WARNING: SELinux is $selinux_status. Ensure SSH ports are allowed in SELinux policies." | sudo tee -a "$log_file"
-    else
-        echo "INFO: SELinux is disabled." | sudo tee -a "$log_file"
-    fi
+# Check for SSH agent
+echo "Checking SSH agent status..."
+if pgrep -x "ssh-agent" > /dev/null; then
+    echo "SSH agent is running."
+else
+    echo "SSH agent is not running."
 fi
+echo
 
-echo "SSH troubleshooting completed. Check the log file at $log_file for details." | sudo tee -a "$log_file"
+# Check SSH login banners and restrictions
+echo "Checking login banners and restrictions..."
+banner_files=(/etc/issue /etc/issue.net /etc/motd)
+for banner in "${banner_files[@]}"; do
+    if [ -f "$banner" ]; then
+        echo "Contents of $banner:"
+        cat "$banner"
+        echo
+    else
+        echo "$banner does not exist."
+        echo
+    fi
+done
+
+# Verify SSH service listening on expected port
+echo "Verifying SSH service is listening on expected ports..."
+ss -tuln | grep ':22'
+
+# Check user and group permissions related to SSH
+echo "Checking user and group permissions for SSH..."
+getent passwd | while IFS=: read -r user _ _ _ _ _; do
+    if [ -d "/home/$user" ] || [ "$user" == "root" ]; then
+        echo "User $user has the following permissions in their .ssh directory:"
+        ls -ld /home/$user/.ssh 2>/dev/null || echo ".ssh directory for $user does not exist."
+    fi
+done
+
+# Provide a final report summary
+echo "SSH audit complete."
